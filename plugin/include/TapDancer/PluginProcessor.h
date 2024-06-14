@@ -1,7 +1,11 @@
 #pragma once
 
-#include "Utils/Delay.h"
+#include "AudioProcessorBlock/ThreeTapDelay.h"
+#include "AudioProcessorBlock/BasicVerb.h"
+#include "AudioProcessorBlock/Preamp.h"
+
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <vector>
 
 //==============================================================================
 class AudioPluginAudioProcessor  : public juce::AudioProcessor
@@ -43,8 +47,28 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
+    //== Tree States ===============================================================
+    juce::AudioProcessorValueTreeState treeState;
+
 private:
-    utils::Delay delay;
     //==============================================================================
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessor)
+    juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (AudioPluginAudioProcessor);
+
+    //==============================================================================
+    AudioProcessorBlock::Preamp preamp;
+    AudioProcessorBlock::ThreeTapDelay tapsDelay;
+    AudioProcessorBlock::BasicVerb diffuser1stStage, diffuser2stStage;
+    juce::AudioBuffer<float> diffuser2stStageBuffer, delayedBuffer;
+
+    void updatePreampParams();
+    void updateTapsDelayParams();
+    void updateBasicVerbParams();
+    void updateOutputParams();
+
+    juce::dsp::DryWetMixer<float> dryWetMixer, decayAmountMixer;
+    juce::dsp::ProcessorDuplicator<juce::dsp::IIR::Filter<float>, juce::dsp::IIR::Coefficients<float>> lowCutFilter;
+
+    double lastSampleRate;
+    float dryWetProportion{ 0.f }, lowCutFrequency{ 20.f }, outGain{ 1.f };
 };

@@ -1,111 +1,115 @@
 #pragma once
 
-#include <juce_audio_basics/juce_audio_basics.h>
+#include <juce_dsp/juce_dsp.h>
+#include <juce_audio_processors/juce_audio_processors.h>
 
-namespace utils
-{
-    template <typename T>
-    T msToSamples(T delayInMs, double sampleRate)
-    {
-        return sampleRate * delayInMs * .001f;
-    }
+#include "Utils/Sine.h"
 
+namespace Utils {
     class Delay
     {
-    private:
-        juce::AudioBuffer<float> buffer;
-        juce::AudioBuffer<float> delayedBlock;
-        int writePosition { 0 };
-        int delayBufferSize { 0 };
-        int delayTime { 0 };
-        double sampleRate { .0f };
-
-        //====================================================================================================
-        void writeToDelayBuffer(juce::AudioBuffer<float>& sourceBuffer, int channel)
-        {
-            int bufferSize = sourceBuffer.getNumSamples();
-            float* bufferWritePointer = sourceBuffer.getWritePointer(channel);
-
-            // Preenche buffer do delay com a lógica de um buffer circular
-            if (delayBufferSize > (bufferSize + writePosition))
-            {
-                buffer.copyFrom(channel, writePosition, bufferWritePointer, bufferSize);
-            } else {
-                auto freeSamplesInBuffer = delayBufferSize - writePosition;
-                buffer.copyFrom(channel, writePosition, bufferWritePointer, freeSamplesInBuffer);
-
-                auto numSamplesToWrapAround = bufferSize - freeSamplesInBuffer;
-                buffer.copyFrom(channel, 0, bufferWritePointer + freeSamplesInBuffer, numSamplesToWrapAround);
-            }
-        }
-
-        //====================================================================================================
-        void readFromDelayedBuffer(juce::AudioBuffer<float>& sourceBuffer, int channel)
-        {
-            int bufferSize = sourceBuffer.getNumSamples();
-            int numChannels = sourceBuffer.getNumChannels();
-            delayedBlock.setSize(numChannels, bufferSize);
-
-            // Lê do buffer com um atraso definido
-            auto readPosition = writePosition - delayTime;
-            if (readPosition < 0)
-                readPosition += delayBufferSize;
-
-            // Check
-            if (readPosition + bufferSize < delayBufferSize)
-            {
-                auto bufferReadPointer = buffer.getReadPointer(channel, readPosition); 
-                delayedBlock.copyFrom(channel, 0, bufferReadPointer, bufferSize);
-            } else {
-                auto bufferReadPointer = buffer.getReadPointer(channel, readPosition); 
-                auto remainingSamplesInBuffer = delayBufferSize - readPosition;
-                delayedBlock.copyFrom(channel, 0, bufferReadPointer, remainingSamplesInBuffer);
-
-                auto wrappingSamplesInBuffer = bufferSize - remainingSamplesInBuffer;
-                bufferReadPointer = buffer.getReadPointer(channel, 0);
-                delayedBlock.copyFrom(channel, remainingSamplesInBuffer, bufferReadPointer, wrappingSamplesInBuffer);
-            }
-        }
-
     public:
-        Delay()
+        Delay() : sampleRate{ 44100.f }, feedback{ .0f }
         {};
 
         ~Delay()
         {};
 
-        //====================================================================================================
-        void prepare(double maxDelayTimeInMs, int numChannels, double _sampleRate)
+        void prepare(const juce::dsp::ProcessSpec &spec, double _sampleRate, float maxDelayInMs)
         {
-            delayBufferSize = static_cast<int>(msToSamples(maxDelayTimeInMs, _sampleRate));
-            buffer.setSize(numChannels, delayBufferSize);
+            auto maxDelayInSamples = static_cast<int>(msToSamples(maxDelayInMs));
+
+            delay.resize(spec.numChannels);
+            for (auto& d : delay)
+            {
+                d.reset();
+                d.prepare(spec);
+                d.setMaximumDelayInSamples(maxDelayInSamples);
+                d.setDelay(1);
+            }
+
+            filterCoef = juce::dsp::FilterDesign<float>::designFIRLowpassWindowMethod(20000.f, _sampleRate, 21, juce::dsp::WindowingFunction<float>::hamming);
+            dampFilter.resize(spec.numChannels);
+            for (auto& f : dampFilter)
+            {
+                f.reset();
+                f.prepare(spec);
+                f.coefficients = filterCoef;
+            }
+
+            modOsc.resize(spec.numChannels);
+            for (auto& osc : modOsc)
+                osc.prepare(sampleRate);
+
+            modAmount = 20;
+            modFreq = 50;
             sampleRate = _sampleRate;
         };
 
-        //====================================================================================================
-        void processBlock(juce::AudioBuffer<float>& sourceBuffer, int channel)
+        void process(juce::AudioSampleBuffer &buffer, int channel)
         {
-            writeToDelayBuffer(sourceBuffer, channel);
-            readFromDelayedBuffer(sourceBuffer, channel);
+            auto* inputSamples = buffer.getReadPointer(channel);
+            auto* outputSamples = buffer.getWritePointer(channel);
+            auto numSamples = buffer.getNumSamples();
+
+            float m = .0f;
+
+            for (int s = 0; s < numSamples; ++s)
+            {
+                if (modAmount > 0)
+                    m = (modOsc[channel].getNextSample() + 1) * modAmount;
+            
+                float delayedSample = delay[channel].popSample(channel, time + m);
+                float sampleToDelay = inputSamples[s] + dampFilter[channel].processSample(std::tanh((feedback * delayedSample)));
+                delay[channel].pushSample(channel, sampleToDelay);
+                outputSamples[s] = delayedSample;
+            }
         };
 
-        //====================================================================================================
-        void setWritePosition(int bufferSize)
+        void setDelayTime(float delayTimeInMs)
         {
-            writePosition += bufferSize;
-            writePosition %= delayBufferSize;
+            auto delayTime = msToSamples(delayTimeInMs);
+            time = delayTime;
+            for (auto& d : delay)
+                d.setDelay(time);
+
         };
 
-        //====================================================================================================
-        void setDelayTime(double delayTimeInMs)
+        void setFeedback(float _feedback)
         {
-            delayTime = static_cast<int>(msToSamples(delayTimeInMs, sampleRate));
+            feedback = _feedback;
         };
 
-        //====================================================================================================
-        juce::AudioBuffer<float> getDelayedSignalBuffer()
+        void setModFreq(float freq)
         {
-            return delayedBlock;
+            modFreq = freq;
+            for (auto& osc : modOsc)
+                osc.setFrequency(modFreq);
+        };
+
+        void setModAmount(float amount)
+        {
+            modAmount = amount;
+        };
+
+        void setDamp(float freq)
+        {
+            filterCoef = juce::dsp::FilterDesign<float>::designFIRLowpassWindowMethod(freq, sampleRate, 21, juce::dsp::WindowingFunction<float>::hamming);
+            for(auto& f : dampFilter)
+                f.coefficients = filterCoef;
+        };
+
+    private:
+        double sampleRate;
+        float feedback, time;
+        float modFreq, modAmount, modPhase;
+        std::vector<Utils::Sine> modOsc;
+        std::vector<juce::dsp::FIR::Filter<float>> dampFilter;
+        juce::dsp::FIR::Coefficients<float>::Ptr filterCoef;
+        std::vector<juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Thiran>> delay;
+
+        float msToSamples(float timeInMs) {
+            return static_cast<float>(sampleRate) * timeInMs * 0.001f;
         }
-    };   
+    };
 }
